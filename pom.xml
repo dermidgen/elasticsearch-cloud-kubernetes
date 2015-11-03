@@ -50,6 +50,7 @@ governing permissions and limitations under the License. -->
     <elasticsearch.version>2.0.0</elasticsearch.version>
     <fabric8.version>2.2.59</fabric8.version>
     <lucene.version>5.2.1</lucene.version>
+    <hamcrest.version>1.3</hamcrest.version>
     <tests.shuffle>true</tests.shuffle>
     <tests.output>onerror</tests.output>
     <tests.client.ratio />
@@ -62,13 +63,13 @@ governing permissions and limitations under the License. -->
     <dependency>
       <groupId>org.hamcrest</groupId>
       <artifactId>hamcrest-core</artifactId>
-      <version>1.3.RC2</version>
+      <version>${hamcrest.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.hamcrest</groupId>
       <artifactId>hamcrest-library</artifactId>
-      <version>1.3.RC2</version>
+      <version>${hamcrest.version}</version>
       <scope>test</scope>
     </dependency>
 
@@ -77,6 +78,16 @@ governing permissions and limitations under the License. -->
       <artifactId>lucene-test-framework</artifactId>
       <version>${lucene.version}</version>
       <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>junit</groupId>
+          <artifactId>junit</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.carrotsearch.randomizedtesting</groupId>
+          <artifactId>junit4-ant</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <!-- Elasticsearch -->
