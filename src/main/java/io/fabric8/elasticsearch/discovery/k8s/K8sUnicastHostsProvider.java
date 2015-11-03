@@ -1,15 +1,15 @@
 package io.fabric8.elasticsearch.discovery.k8s;
 
-import io.fabric8.kubernetes.api.Kubernetes;
-import io.fabric8.kubernetes.api.KubernetesFactory;
+import com.google.common.collect.Lists;
 import io.fabric8.kubernetes.api.KubernetesHelper;
 import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.ContainerPort;
 import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.api.model.Port;
+import io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClient;
 import org.elasticsearch.Version;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.component.AbstractComponent;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.network.NetworkService;
@@ -28,22 +28,21 @@ import java.util.Set;
 
 public class K8sUnicastHostsProvider extends AbstractComponent implements UnicastHostsProvider {
 
-    static final class Status {
+    static final class Phase {
         private static final String RUNNING = "Running";
     }
 
     static final public class Fields {
         public static final String REFRESH = "refresh_interval";
-        public static final String VERSION = "Elasticsearch/K8sCloud/1.0";
+        public static final String VERSION = "Elasticsearch/K8sCloud/2.0";
         public static final String SELECTOR = "selector";
         public static final String SERVICE_DNS = "servicedns";
     }
 
-    private Kubernetes kubernetes;
-
     private TransportService transportService;
     private NetworkService networkService;
 
+    private final KubernetesClient kubernetesClient;
     private final String selector;
     private final String serviceDns;
 
@@ -59,11 +58,12 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
         this.transportService = transportService;
         this.networkService = networkService;
 
-        this.refreshInterval = componentSettings.getAsTime(Fields.REFRESH,
+        this.refreshInterval = this.settings.getAsTime(Fields.REFRESH,
                 settings.getAsTime("cloud.k8s." + Fields.REFRESH, TimeValue.timeValueSeconds(0)));
 
-        this.selector = componentSettings.get(Fields.SELECTOR, settings.get("cloud.k8s." + Fields.SELECTOR));
-        this.serviceDns = componentSettings.get(Fields.SELECTOR, settings.get("cloud.k8s." + Fields.SERVICE_DNS));
+        this.kubernetesClient = new DefaultKubernetesClient();
+        this.selector = this.settings.get(Fields.SELECTOR, settings.get("cloud.k8s." + Fields.SELECTOR));
+        this.serviceDns = this.settings.get(Fields.SELECTOR, settings.get("cloud.k8s." + Fields.SERVICE_DNS));
 
         // Check that we have all needed properties
         if (!(Strings.hasText(this.selector) || Strings.hasText(this.serviceDns))) {
@@ -119,7 +119,7 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
     }
 
     private List<DiscoveryNode> getNodesFromKubernetesSelector(String currentIpAddress) {
-        Map<String, Pod> podMap = KubernetesHelper.getSelectedPodMap(getKubernetes(), selector);
+        Map<String, Pod> podMap = KubernetesHelper.getSelectedPodMap(kubernetesClient, selector);
         Collection<Pod> pods = podMap.values();
 
         if (pods == null) {
@@ -128,43 +128,40 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
         }
 
         for (Pod pod : pods) {
-            String status = pod.getCurrentState().getStatus();
-            logger.trace("k8s instance {} with status {} found.", pod.getId(), status);
-
-            if (!status.equals(Status.RUNNING)) {
-                logger.trace("k8s instance {} is not running - ignoring.", pod.getId());
+            if (!pod.getStatus().getPhase().equals(Phase.RUNNING)) {
+                logger.trace("k8s instance {} is not running - ignoring.", pod.getMetadata().getUid());
                 continue;
             }
 
             try {
-                String podIp = pod.getCurrentState().getPodIP();
+                String podIp = pod.getStatus().getPodIP();
 
                 if (podIp.equals(currentIpAddress)) {
                     // We found the current node.
                     // We can ignore it in the list of DiscoveryNode
-                    logger.trace("current node found. Ignoring {} - {}", pod.getId(), podIp);
+                    logger.trace("current node found. Ignoring {} - {}", pod.getMetadata().getUid(), podIp);
                 } else {
                     List<Container> containers = KubernetesHelper.getContainers(pod);
                     for (Container container : containers) {
-                        logger.trace("pod " + pod.getId() + " container: " + container.getName() + " image: " + container.getImage());
-                        List<Port> ports = container.getPorts();
-                        for (Port port : ports) {
+                        logger.trace("pod " + pod.getMetadata().getUid() + " container: " + container.getName() + " image: " + container.getImage());
+                        List<ContainerPort> ports = container.getPorts();
+                        for (ContainerPort port : ports) {
                             Integer containerPort = port.getContainerPort();
                             if (containerPort == 9300) {
                                 String address = podIp.concat(":").concat(containerPort.toString());
 
                                 // pod IP is a single IP Address. We need to build a TransportAddress from it
-                                TransportAddress[] addresses = transportService.addressesFromString(address);
+                                TransportAddress[] addresses = transportService.addressesFromString(address, 254);
 
-                                logger.trace("adding {}, address {}, transport_address {}, status {}", pod.getId(),
-                                        podIp, addresses[0], status);
-                                cachedDiscoNodes.add(new DiscoveryNode("#cloud-" + pod.getId() + "-" + 0, addresses[0], Version.CURRENT));
+                                logger.trace("adding {}, address {}, transport_address {}, status {}", pod.getMetadata().getUid(),
+                                        podIp, addresses[0], pod.getStatus().getPhase());
+                                cachedDiscoNodes.add(new DiscoveryNode("#cloud-" + pod.getMetadata().getUid() + "-" + 0, addresses[0], Version.CURRENT));
                             }
                         }
                     }
                 }
             } catch (Exception e) {
-                logger.warn("failed to add {}", e, pod.getId());
+                logger.warn("failed to add {}", e, pod.getMetadata().getUid());
             }
         }
 
@@ -172,14 +169,14 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
     }
 
     private List<DiscoveryNode> getNodesFromKubernetesServiceDns(String currentIpAddress) throws Exception {
-        Set<String> serivceEndpointIps = KubernetesHelper.lookupServiceInDns(serviceDns);
+        Set<String> serviceEndpointIps = KubernetesHelper.lookupServiceInDns(serviceDns);
 
-        if (serivceEndpointIps == null) {
+        if (serviceEndpointIps == null) {
             logger.trace("no service endpoints found for service name [{}].", this.serviceDns);
             return cachedDiscoNodes;
         }
 
-        for (String endpointIp : serivceEndpointIps) {
+        for (String endpointIp : serviceEndpointIps) {
             if (endpointIp.equals(currentIpAddress)) {
                 // We found the current node.
                 // We can ignore it in the list of DiscoveryNode
@@ -188,7 +185,7 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
                 String address = endpointIp.concat(":9300");
 
                 // pod IP is a single IP Address. We need to build a TransportAddress from it
-                TransportAddress[] addresses = transportService.addressesFromString(address);
+                TransportAddress[] addresses = transportService.addressesFromString(address, 254);
 
                 logger.trace("adding address {}, transport_address {}",
                         endpointIp, addresses[0]);
@@ -199,10 +196,4 @@ public class K8sUnicastHostsProvider extends AbstractComponent implements Unicas
         return cachedDiscoNodes;
     }
 
-    private Kubernetes getKubernetes() {
-        if (kubernetes == null) {
-            kubernetes = new KubernetesFactory().createKubernetes();
-        }
-        return kubernetes;
-    }
 }
